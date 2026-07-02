@@ -13,14 +13,6 @@ binding = "ASSETS"
 binding = "AI"
 
 [vars]
-PAYRAIL_URL = "https://payrail.ivixivi.workers.dev"
-
-# Shared fleet money rail — internal worker→worker service binding (preferred over
-# the public PAYRAIL_URL fallback; skips the edge so it dodges the *.workers.dev
-# same-zone restriction and bot-management).
-[[services]]
-binding = "PAYRAIL"
-service = "payrail"
 
 [[kv_namespaces]]
 binding = "RATE_KV"
