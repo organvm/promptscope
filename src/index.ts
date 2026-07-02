@@ -14,6 +14,7 @@ interface Env {
   PROMPTSCOPE_PRO_TOKENS: KVNamespace;
   STRIPE_SECRET_KEY?: string;
   STRIPE_PRICE_ID_PRO?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
   PROMPTSCOPE_BASE_URL?: string;
   CRYPTO_PAY_ADDRESS?: string;
   CRYPTO_CHAIN?: string;
@@ -250,83 +251,101 @@ async function handleShare(req: Request, env: Env): Promise<Response> {
   return new Response('method not allowed', { status: 405 });
 }
 
-// Buy route. Gets a live quote from the shared payrail rail and returns a 402
-// carrying the on-chain address + memo (quote_id). The buyer pays, then POSTs
-// the tx hash to /api/confirm to mint a Pro token. No more "wired-but-unset" 503.
+// Buy route. Creates a Stripe Checkout Session and redirects.
 async function handleCheckout(req: Request, env: Env): Promise<Response> {
   if (req.method !== 'POST') return new Response('method not allowed', { status: 405 });
-  let q: PayrailQuote;
-  try {
-    q = await payrailQuote(env);
-  } catch (err) {
-    return Response.json({ error: 'rail_unavailable', detail: String(err) }, { status: 502 });
+  
+  if (!env.STRIPE_SECRET_KEY || !env.STRIPE_PRICE_ID_PRO) {
+    return Response.json({ error: 'Stripe not configured' }, { status: 500 });
   }
-  await env.PROMPTSCOPE_PRO_TOKENS.put(
-    `pending:${q.quote_id}`,
-    JSON.stringify({ tier: 'pro', quote_id: q.quote_id, created_at: new Date().toISOString() }),
-    { expirationTtl: PENDING_TTL_SECONDS },
-  );
-  return Response.json({
-    status: 'payment_required',
-    tier: 'pro',
-    quote_id: q.quote_id,
-    pay_to: q.pay_to,
-    confirm_url: '/api/confirm',
-    instructions: q.instructions,
-    expires_in_seconds: q.expires_in_seconds,
-  }, { status: 402 });
-}
 
-// A buyer who paid posts { quote_id, tx_hash }. We forward it to payrail
-// /receipt — the receipt's payer_ref == tx_hash is the TIER-1 artifact — then
-// mint an active Pro token (the 'active' convention isProAuth() checks) and
-// return it to the client so they can use it as x-promptscope-token.
-async function handleConfirm(req: Request, env: Env): Promise<Response> {
-  if (req.method !== 'POST') return new Response('method not allowed', { status: 405 });
-  const body = await req.json().catch(() => null) as { quote_id?: string; tx_hash?: string } | null;
-  if (!body?.quote_id || !body?.tx_hash) {
-    return Response.json({ error: 'quote_id and tx_hash required' }, { status: 400 });
-  }
-  const pendingRaw = await env.PROMPTSCOPE_PRO_TOKENS.get(`pending:${body.quote_id}`);
-  if (!pendingRaw) return Response.json({ error: 'quote_not_found_or_expired' }, { status: 404 });
-
-  const payload = JSON.stringify({
-    quote_id: body.quote_id,
-    ship: 'promptscope',
-    sku: 'promptscope:pro',
-    amount: PRO_PRICE,
-    currency: 'USDC',
-    rail: 'crypto',
-    tx_hash: body.tx_hash,
-  });
-  const headers: Record<string, string> = { 'content-type': 'application/json' };
-  if (env.SHIP_HMAC_SECRET) headers['x-payrail-signature'] = await hmacHex(env.SHIP_HMAC_SECRET, payload);
-
-  const rr = await payrailFetch(env, '/receipt', { method: 'POST', headers, body: payload });
-  if (!rr.ok) {
-    return Response.json(
-      { error: 'receipt_rejected', status: rr.status, detail: await rr.text().catch(() => '') },
-      { status: 502 },
-    );
-  }
-  const receiptResp = await rr.json().catch(() => ({})) as { ok?: boolean; receipt?: unknown };
-
-  // Mint the active Pro token. isProAuth() checks PROMPTSCOPE_PRO_TOKENS.get(token) === 'active'.
   const token = newId();
-  await env.PROMPTSCOPE_PRO_TOKENS.put(token, 'active');
-  await env.PROMPTSCOPE_PRO_TOKENS.delete(`pending:${body.quote_id}`);
-  return Response.json({ ok: true, tier: 'pro', token, receipt: receiptResp.receipt }, { status: 201 });
+  await env.PROMPTSCOPE_PRO_TOKENS.put(`pending:${token}`, 'stripe_pending', { expirationTtl: 86400 });
+
+  const origin = env.PROMPTSCOPE_BASE_URL || new URL(req.url).origin;
+  const params = new URLSearchParams({
+    'success_url': `${origin}/?success=true&token=${token}`,
+    'cancel_url': `${origin}/?cancel=true`,
+    'mode': 'subscription',
+    'client_reference_id': token,
+  });
+  params.append('line_items[0][price]', env.STRIPE_PRICE_ID_PRO);
+  params.append('line_items[0][quantity]', '1');
+
+  const res = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: params.toString(),
+  });
+  
+  const data = await res.json() as any;
+  if (!res.ok) {
+    return Response.json({ error: data.error?.message || 'Stripe error' }, { status: 502 });
+  }
+  
+  return Response.json({ checkout_url: data.url });
 }
 
-// Poll payment status by proxying payrail's public receipt lookup.
-async function handlePayStatus(req: Request, env: Env): Promise<Response> {
-  const url = new URL(req.url);
-  const quoteId = url.searchParams.get('quote_id');
-  if (!quoteId) return Response.json({ error: 'quote_id required' }, { status: 400 });
-  const r = await payrailFetch(env, `/receipt/${encodeURIComponent(quoteId)}`);
-  if (r.status === 404) return Response.json({ paid: false, quote_id: quoteId });
-  if (!r.ok) return Response.json({ error: 'status_unavailable', status: r.status }, { status: 502 });
-  return Response.json({ paid: true, receipt: await r.json() });
+async function verifyStripeSignature(payload: string, sigHeader: string, secret: string) {
+  const sigs = sigHeader.split(',').reduce((acc, part) => {
+    const [k, v] = part.split('=');
+    acc[k] = v;
+    return acc;
+  }, {} as Record<string, string>);
+  
+  if (!sigs.t || !sigs.v1) return false;
+  
+  const signedPayload = `${sigs.t}.${payload}`;
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(signedPayload));
+  const hex = [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, '0')).join('');
+  return hex === sigs.v1;
+}
+
+async function handleStripeWebhook(req: Request, env: Env): Promise<Response> {
+  if (req.method !== 'POST') return new Response('method not allowed', { status: 405 });
+  
+  const sig = req.headers.get('stripe-signature');
+  const secret = env.STRIPE_WEBHOOK_SECRET;
+  if (!sig || !secret) return new Response('missing sig or secret', { status: 400 });
+
+  const bodyText = await req.text();
+  const valid = await verifyStripeSignature(bodyText, sig, secret);
+  if (!valid) return new Response('invalid signature', { status: 400 });
+
+  let event: any;
+  try {
+    event = JSON.parse(bodyText);
+  } catch {
+    return new Response('invalid json', { status: 400 });
+  }
+
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    const token = session.client_reference_id;
+    if (token) {
+      await env.PROMPTSCOPE_PRO_TOKENS.put(token, 'active');
+      await env.PROMPTSCOPE_PRO_TOKENS.delete(`pending:${token}`);
+      if (session.subscription) {
+        await env.PROMPTSCOPE_PRO_TOKENS.put(`sub:${session.subscription}`, token);
+      }
+    }
+  } else if (event.type === 'customer.subscription.deleted') {
+    const subId = event.data.object.id;
+    const token = await env.PROMPTSCOPE_PRO_TOKENS.get(`sub:${subId}`);
+    if (token) {
+      await env.PROMPTSCOPE_PRO_TOKENS.delete(token);
+      await env.PROMPTSCOPE_PRO_TOKENS.delete(`sub:${subId}`);
+    }
+  }
+
+  return new Response('ok');
 }
 
 async function handlePaymentInfo(req: Request, env: Env): Promise<Response> {
@@ -346,8 +365,7 @@ export default {
     if (url.pathname === '/api/analyze') return handleAnalyze(req, env);
     if (url.pathname === '/api/share')   return handleShare(req, env);
     if (url.pathname === '/api/checkout') return handleCheckout(req, env);
-    if (url.pathname === '/api/confirm') return handleConfirm(req, env);
-    if (url.pathname === '/api/pay-status') return handlePayStatus(req, env);
+    if (url.pathname === '/api/webhook/stripe') return handleStripeWebhook(req, env);
     if (url.pathname === '/api/payment-info') return handlePaymentInfo(req, env);
 
     // Static assets — passthrough
