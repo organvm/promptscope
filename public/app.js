@@ -56,9 +56,13 @@ async function analyze() {
   }
   setLoading(true);
   try {
+    const headers = { "Content-Type": "application/json" };
+    const token = localStorage.getItem("promptscope_token");
+    if (token) headers["x-promptscope-token"] = token;
+
     const r = await fetch("/api/analyze", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ prompt: text }),
     });
     const data = await r.json();
@@ -105,26 +109,11 @@ async function getShareLink() {
   }
 }
 
-// ── USDC checkout (x402-style quote → pay → confirm) ──────────────────────
-let CO = { tier: null, quote_id: null, address: null, confirm_url: "/api/confirm" };
+// ── Stripe checkout ──────────────────────
 
-function upgrade(tier) {
-  CO.tier = tier || "pro";
-  $("checkout-title").textContent = "Upgrade to Pro — $19";
-  const sec = $("checkout");
-  sec.style.display = "";
-  $("co-quote").style.display = "none";
-  $("co-msg").textContent = "";
-  sec.scrollIntoView({ behavior: "smooth", block: "start" });
-  startCheckout();
-}
-
-async function startCheckout() {
-  const btn = $("upgrade-usdc-btn");
-  const msg = $("co-msg");
-  if (btn) { btn.disabled = true; btn.textContent = "Getting quote…"; }
-  msg.style.color = "var(--muted)";
-  msg.textContent = "Fetching payment details…";
+async function upgrade() {
+  const btn = $("upgrade-btn");
+  if (btn) { btn.disabled = true; btn.textContent = "Redirecting…"; }
   try {
     const r = await fetch("/api/checkout", {
       method: "POST",
@@ -132,101 +121,29 @@ async function startCheckout() {
       body: JSON.stringify({}),
     });
     const d = await r.json();
-    if (r.status === 402 && d.pay_to) {
-      CO.quote_id = d.quote_id;
-      CO.address = d.pay_to.address;
-      CO.confirm_url = d.confirm_url || "/api/confirm";
-      $("q-amount").textContent = `${d.pay_to.amount} ${d.pay_to.asset}`;
-      $("q-asset").textContent = `${d.pay_to.asset} on ${d.pay_to.chain}`;
-      $("q-address").textContent = d.pay_to.address;
-      $("q-quote").textContent = d.quote_id;
-      $("q-instructions").textContent = d.instructions || "";
-      $("co-quote").style.display = "";
-      msg.style.color = "var(--muted)";
-      msg.textContent = "Send the exact amount, then paste your transaction hash below.";
-    } else if (r.ok && d.checkout_url) {
+    if (r.ok && d.checkout_url) {
       window.location = d.checkout_url;
-    } else if (r.ok) {
-      msg.style.color = "var(--good)";
-      msg.textContent = d.message || "checkout ready";
     } else {
-      msg.style.color = "var(--bad)";
-      msg.textContent = d.error || "could not start checkout";
+      alert(d.error || "could not start checkout");
     }
   } catch (err) {
-    msg.style.color = "var(--bad)";
-    msg.textContent = "network error — try again";
+    alert("network error — try again");
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = "Upgrade to Pro — pay with USDC ($19)"; }
+    if (btn) { btn.disabled = false; btn.textContent = "Get Pro"; }
   }
-}
-
-async function copyAddr() {
-  try {
-    await navigator.clipboard.writeText(CO.address || "");
-    const b = $("q-copy");
-    b.textContent = "copied";
-    setTimeout(() => { b.textContent = "copy"; }, 1500);
-  } catch (e) {}
-}
-
-async function confirmTx() {
-  const btn = $("co-confirm-btn");
-  const tx = $("co-tx").value.trim();
-  const msg = $("co-msg");
-  if (!/^0x[0-9a-fA-F]{6,}$/.test(tx)) {
-    msg.style.color = "var(--bad)";
-    msg.textContent = "paste a valid 0x… transaction hash";
-    return;
-  }
-  if (!CO.quote_id) {
-    msg.style.color = "var(--bad)";
-    msg.textContent = "get a payment quote first";
-    return;
-  }
-  btn.disabled = true;
-  btn.textContent = "verifying…";
-  try {
-    const r = await fetch(CO.confirm_url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ quote_id: CO.quote_id, tx_hash: tx }),
-    });
-    const d = await r.json();
-    if (r.ok) {
-      msg.style.color = "var(--good)";
-      msg.textContent = "✓ Pro unlocked — receipt recorded. We'll email your access details.";
-    } else {
-      msg.style.color = "var(--bad)";
-      msg.textContent = d.error || "payment not verified yet — on-chain confirmation can take a moment, try again shortly";
-    }
-  } catch (err) {
-    msg.style.color = "var(--bad)";
-    msg.textContent = "network error — try again";
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "I've sent it — unlock";
-  }
-}
-
-async function loadCryptoAddress() {
-  try {
-    const r = await fetch("/api/payment-info");
-    if (!r.ok) return;
-    const data = await r.json();
-    if (data.crypto_address) {
-      $("crypto-addr").textContent = data.crypto_address;
-    } else {
-      $("crypto-addr").textContent = "(generating soon)";
-    }
-  } catch {}
 }
 
 document.addEventListener("DOMContentLoaded", () => {
   $("analyze-btn").addEventListener("click", analyze);
   $("share-btn").addEventListener("click", getShareLink);
-  $("upgrade-btn").addEventListener("click", () => upgrade("pro"));
-  loadCryptoAddress();
+  $("upgrade-btn").addEventListener("click", upgrade);
+
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("success") === "true" && params.get("token")) {
+    localStorage.setItem("promptscope_token", params.get("token"));
+    window.history.replaceState({}, document.title, "/");
+    setTimeout(() => alert("Pro unlocked! You now have unlimited analyses and suggested rewrites."), 100);
+  }
 
   // Hydrate from /s/<id> path if shared
   const m = window.location.pathname.match(/^\/s\/([a-zA-Z0-9_-]+)$/);
