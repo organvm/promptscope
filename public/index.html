@@ -80,27 +80,6 @@ e.g.,
       <li>Team workspace for shared review</li>
     </ul>
     <button id="upgrade-btn">Get Pro</button>
-    <button id="upgrade-usdc-btn" onclick="upgrade('pro')" style="margin-left:8px">Upgrade to Pro — pay with USDC ($19)</button>
-    <p class="alt-pay">Or pay with crypto (USDC on Base): <code id="crypto-addr">checking…</code></p>
-  </section>
-
-  <section id="checkout" class="upgrade-card" style="display:none">
-    <h2 id="checkout-title">Upgrade to Pro — $19</h2>
-    <p class="alt-pay" id="checkout-sub" style="margin-top:0">Pay once with USDC on Base. Send the exact amount to the address below using the quote id as your memo, then paste your transaction hash to unlock. No card, no account.</p>
-    <div id="co-quote" style="display:none;margin-top:14px">
-      <div class="rails">
-        <div class="row"><span class="label">Amount</span><span class="val" id="q-amount"></span></div>
-        <div class="row"><span class="label">Asset / chain</span><span class="val" id="q-asset"></span></div>
-        <div class="row"><span class="label">Send to</span><span class="val" id="q-address"></span><button onclick="copyAddr()" id="q-copy" style="font-size:11px;padding:4px 8px">copy</button></div>
-        <div class="row"><span class="label">Memo (quote id)</span><span class="val" id="q-quote"></span></div>
-      </div>
-      <p class="alt-pay" id="q-instructions" style="margin-top:8px"></p>
-      <div class="share-row" style="margin-top:10px">
-        <input id="co-tx" type="text" placeholder="0x… transaction hash">
-        <button onclick="confirmTx()" id="co-confirm-btn">I've sent it — unlock</button>
-      </div>
-    </div>
-    <p style="font-size:13px;margin-top:10px" id="co-msg"></p>
   </section>
 
   <section id="why">
