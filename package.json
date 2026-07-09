@@ -13,7 +13,7 @@
     "kv:create": "scripts/kv-bootstrap.sh"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20240909.0",
+    "@cloudflare/workers-types": "^5.20260706.1",
     "typescript": "^6.0.3"
   }
 }
